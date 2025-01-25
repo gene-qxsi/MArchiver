@@ -6,6 +6,7 @@ package cmd
 import (
 	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dsnet/compress/bzip2"
 	"github.com/spf13/cobra"
+	"github.com/ulikunitz/xz"
 )
 
 var path string
@@ -32,21 +35,21 @@ const (
 
 // алгоритмы сжатия
 const (
-	gzip    string = "gzip"
-	bzip2   string = "bzip2"
-	xz      string = "xz"
-	none    string = "none"
-	deflate string = "deflate"
-	lzma    string = "lzma"
+	gzip_    string = "gzip"
+	bzip2_   string = "bzip2"
+	xz_      string = "xz"
+	none_    string = "none"
+	deflate_ string = "deflate"
+	lzma_    string = "lzma"
 )
 
 // позже расширить, добавив 7z и RAR
 var supportedArchiveTypes = map[string][]string{
-	zip_:    {deflate, lzma},
-	tar_:    {gzip, bzip2, xz, none}, // "none" указывает что архив не использует алгоритм сжатия
-	tarGz_:  {gzip},
-	tarBz2_: {bzip2},
-	tarXz_:  {xz},
+	zip_:    {deflate_, lzma_},
+	tar_:    {gzip_, bzip2_, xz_, none_}, // "none" указывает что архив не использует алгоритм сжатия
+	tarGz_:  {gzip_},
+	tarBz2_: {bzip2_},
+	tarXz_:  {xz_},
 }
 
 var archiveCmd = &cobra.Command{
@@ -90,21 +93,20 @@ func createArchive(args []string) {
 // базовый метод для определения слгоритма
 func createTARArchive(archiveFile *os.File, args []string) {
 
-	writer := tar.NewWriter(archiveFile)
-
-	if algorithm == none {
-		createTARArchiveNONE(writer, args)
-	} else if algorithm == gzip {
-		createTARArchiveGZIP(writer, args)
-	} else if algorithm == bzip2 {
-		createTARArchiveBZIP2(writer, args)
-	} else if algorithm == xz {
-		createTARArchiveXZ(writer, args)
+	if algorithm == none_ {
+		createTARArchiveNONE(archiveFile, args)
+	} else if algorithm == gzip_ {
+		createTARArchiveGZIP(archiveFile, args)
+	} else if algorithm == bzip2_ {
+		createTARArchiveBZIP2(archiveFile, args)
+	} else if algorithm == xz_ {
+		createTARArchiveXZ(archiveFile, args)
 	}
 }
 
 // TAR-none
-func createTARArchiveNONE(writer *tar.Writer, args []string) {
+func createTARArchiveNONE(archiveFile *os.File, args []string) {
+	writer := tar.NewWriter(archiveFile)
 	for _, filepath := range args {
 		info, err := os.Stat(filepath)
 		if err != nil {
@@ -112,15 +114,15 @@ func createTARArchiveNONE(writer *tar.Writer, args []string) {
 		}
 
 		if info.IsDir() {
-			copyTARArchiveNONEDir(writer, filepath)
+			copyTARArchiveDir(writer, filepath)
 		} else {
-			copyTARArchiveNONEFile(writer, filepath, filepath)
+			copyTARArchiveFile(writer, filepath, filepath)
 		}
 	}
 }
 
 // TAR-none копирование директории
-func copyTARArchiveNONEDir(writer *tar.Writer, pathToFile string) {
+func copyTARArchiveDir(writer *tar.Writer, pathToFile string) {
 	fs.WalkDir(os.DirFS(pathToFile), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			panic("error walk to dir")
@@ -141,14 +143,14 @@ func copyTARArchiveNONEDir(writer *tar.Writer, pathToFile string) {
 				panic("error write header")
 			}
 		} else {
-			copyTARArchiveNONEFile(writer, filepath.Join(pathToFile, path), path)
+			copyTARArchiveFile(writer, filepath.Join(pathToFile, path), path)
 		}
 		return nil
 	})
 }
 
 // TAR-none копирование файла
-func copyTARArchiveNONEFile(writer *tar.Writer, filepath string, archiveFilePath string) {
+func copyTARArchiveFile(writer *tar.Writer, filepath string, archiveFilePath string) {
 	file, err := os.Open(filepath)
 	if err != nil {
 		panic("error open file for reading")
@@ -187,16 +189,83 @@ func copyTARArchiveNONEFile(writer *tar.Writer, filepath string, archiveFilePath
 	}
 }
 
-func createTARArchiveXZ(writer *tar.Writer, args []string) {
-	// реализовать 24.01
+// TAR-XZ
+func createTARArchiveXZ(archiveFile *os.File, args []string) {
+	xzWriter, err := xz.NewWriter(archiveFile)
+	if err != nil {
+		panic("error create xz writer")
+	}
+	defer xzWriter.Close()
+
+	writer := tar.NewWriter(xzWriter)
+	defer writer.Close()
+
+	for _, arg := range args {
+		if info, err := os.Stat(arg); err == nil {
+			if info.IsDir() {
+				copyTARArchiveDir(writer, arg)
+			} else {
+				copyTARArchiveFile(writer, arg, arg)
+			}
+		} else {
+			panic("error get stat")
+		}
+	}
 }
 
-func createTARArchiveBZIP2(writer *tar.Writer, args []string) {
-	// реализовать 24.01
+// TAR-BZIP2
+func createTARArchiveBZIP2(archiveFile *os.File, args []string) {
+	// добавить проверку: содержит ли имя архива расширение сжатия, если не содержит - добавить
+	bz2Writer, err := bzip2.NewWriter(archiveFile, nil)
+	if err != nil {
+		panic("error create bzip2 writer")
+	}
+	defer bz2Writer.Close()
+
+	writer := tar.NewWriter(bz2Writer)
+	defer writer.Close()
+
+	for _, arg := range args {
+		if info, err := os.Stat(arg); err == nil {
+			if info.IsDir() {
+				copyTARArchiveDir(writer, arg)
+			} else {
+				copyTARArchiveFile(writer, arg, arg)
+			}
+		} else {
+			panic("error get stat")
+		}
+	}
+
 }
 
-func createTARArchiveGZIP(writer *tar.Writer, args []string) {
-	// реализовать 24.01
+// TAR-GZIP
+func createTARArchiveGZIP(archiveFile *os.File, args []string) {
+	gzipWriter := gzip.NewWriter(archiveFile)
+	defer func() {
+		if err := gzipWriter.Close(); err != nil {
+			fmt.Println("error closing gzip writer:", err)
+		}
+	}()
+
+	writer := tar.NewWriter(gzipWriter)
+	defer func() {
+		if err := writer.Close(); err != nil {
+			fmt.Println("error closing tar writer:", err)
+		}
+	}()
+
+	for _, arg := range args {
+		if info, err := os.Stat(arg); err == nil {
+			if info.IsDir() {
+				copyTARArchiveDir(writer, arg)
+			} else {
+				copyTARArchiveFile(writer, arg, arg)
+			}
+		} else {
+			panic("error get stat")
+		}
+	}
 }
 
 // ZIP
@@ -205,9 +274,9 @@ func createZIPArchive(archiveFile *os.File, args []string) {
 	writer := zip.NewWriter(archiveFile)
 	defer writer.Close()
 
-	if algorithm == deflate {
+	if algorithm == deflate_ {
 		createZIPArchiveDEFLATE(writer, args)
-	} else if algorithm == lzma {
+	} else if algorithm == lzma_ {
 		createZIPArchiveLZMA(writer, args)
 	}
 }
@@ -265,7 +334,7 @@ func copyZIPArchiveDEFALTEFile(argPathToFOD string, relativePath string, writer 
 	if err != nil {
 		panic("error create file")
 	}
-	fmt.Println(argPathToFOD)
+
 	fileReader, err := os.Open(argPathToFOD)
 	if err != nil {
 		panic("error open file for reading")
@@ -288,6 +357,7 @@ func validateInputs(args []string) {
 	validateArchiveName()
 	validatePath()
 	validateExtension()
+	validateArchiveType()
 	validateAlgorithm()
 	validateArgsFiles(args)
 }
@@ -301,6 +371,18 @@ func validateArgsFiles(files []string) {
 			} else {
 				panic("error " + err.Error())
 			}
+		}
+	}
+}
+
+func validateArchiveType() {
+	if strings.HasSuffix(archiveName, ".tar") {
+		if algorithm == gzip_ {
+			archiveName += ".gz"
+		} else if algorithm == bzip2_ {
+			archiveName += ".bz2"
+		} else if algorithm == xz_ {
+			archiveName += ".xz"
 		}
 	}
 }
@@ -362,15 +444,15 @@ func validateExtension() {
 // установка базовых значений
 func setDefaulAlghoritm() {
 	if strings.HasSuffix(archiveName, zip_) {
-		algorithm = deflate
+		algorithm = deflate_
 	} else if strings.HasSuffix(archiveName, tar_) {
-		algorithm = none
+		algorithm = none_
 	} else if strings.HasSuffix(archiveName, tarGz_) {
-		algorithm = gzip
+		algorithm = gzip_
 	} else if strings.HasSuffix(archiveName, tarBz2_) {
-		algorithm = bzip2
+		algorithm = bzip2_
 	} else if strings.HasSuffix(archiveName, tarXz_) {
-		algorithm = xz
+		algorithm = xz_
 	} else {
 		panic("algorithm not supported")
 	}
